@@ -46,21 +46,29 @@ cgui            # launch TUI
 cgui tui        # same
 ```
 
-| Key            | Action                                  |
-| -------------- | --------------------------------------- |
-| `q` / `Esc`    | Quit                                    |
-| `Tab` / `→`    | Next tab                                |
-| `Shift+Tab`/`←`| Prev tab                                |
-| `↑` / `↓` / `j`| Move selection                          |
-| `r`            | Refresh now                             |
-| `a`            | Toggle show-all vs running-only         |
-| `s`            | Start selected container                |
-| `x`            | Stop selected container                 |
-| `K`            | Kill selected container (capital K)     |
-| `d`            | Delete selected container               |
-| `l`            | Load logs for selected → Logs tab       |
+| Key            | Action                                          |
+| -------------- | ----------------------------------------------- |
+| `q` / `Esc`    | Quit (or clear filter, if one is set)           |
+| `Tab` / `→`    | Next tab                                        |
+| `Shift+Tab`/`←`| Prev tab                                        |
+| `↑` / `↓` / `j`| Move selection                                  |
+| `Enter`        | **Inspect** — open scrollable JSON detail pane  |
+| `/`            | **Filter** rows in current tab (Enter to apply) |
+| `o`            | Cycle **sort** key for current tab              |
+| `r`            | Refresh now                                     |
+| `a`            | Toggle show-all vs running-only                 |
+| `s`            | Start selected container                        |
+| `x`            | Stop selected container                         |
+| `K`            | Kill selected container (capital K)             |
+| `d`            | Delete selected container                       |
+| `l`            | Load logs for selected → Logs tab               |
+| `e`            | **Exec** — drop into `/bin/sh` in selected container (Ctrl-D returns to TUI) |
+| `p`            | **Pull** an image (Images tab) — opens prompt + live progress modal |
 
-State refreshes every 2s; the sparklines smooth across ~4 minutes of history (120 samples).
+In the Detail pane: `↑↓`/`PgUp`/`PgDn` scroll, `Esc` closes.
+In the Pull modal: `Esc` hides; pull keeps running in the background and the status bar reports completion.
+
+State refreshes every 2s; sparklines smooth across ~4 minutes of history (120 samples).
 
 ### Docker-compat shim
 
@@ -95,8 +103,11 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 
 ## Roadmap
 
-- `exec` shell-out (drop the user into a pty for the selected container)
-- Image pull progress UI
-- Sort/filter columns
-- Detail pane on `Enter` (full `container inspect` JSON viewer)
+- ~~`exec` shell-out (drop the user into a pty for the selected container)~~ ✅
+- ~~Image pull progress UI~~ ✅
+- ~~Sort/filter columns~~ ✅
+- ~~Detail pane on `Enter` (full `container inspect` JSON viewer)~~ ✅
 - Optional GUI front end (Tauri) sharing the same `container.rs` core
+- `inspect` syntax highlighting in the detail pane
+- Multi-select for batch start/stop/delete
+- `stats` per-row column overlay (live CPU/MEM in the Containers table)

@@ -7,6 +7,9 @@
 use anyhow::{anyhow, Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 const BIN: &str = "container";
@@ -252,4 +255,79 @@ pub async fn kill(id: &str) -> Result<()> {
 }
 pub async fn delete(id: &str) -> Result<()> {
     run(&["delete", id]).await.map(|_| ())
+}
+
+/// Pretty-printed `container inspect <id>` JSON. Falls back to raw stdout if
+/// the response isn't valid JSON for any reason.
+pub async fn inspect(id: &str) -> Result<String> {
+    let bytes = run(&["inspect", id]).await?;
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(v) => Ok(serde_json::to_string_pretty(&v).unwrap_or_else(|_| {
+            String::from_utf8_lossy(&bytes).into_owned()
+        })),
+        Err(_) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+    }
+}
+
+/// Streaming pull. Spawns `container image pull <reference>`, appends each
+/// stdout/stderr line to `sink`, and reports completion via the returned
+/// JoinHandle (Ok = success, Err = non-zero exit + last line).
+pub fn spawn_pull(
+    reference: String,
+    sink: Arc<Mutex<Vec<String>>>,
+) -> tokio::task::JoinHandle<Result<()>> {
+    tokio::spawn(async move {
+        push(&sink, format!("$ container image pull {reference}"));
+        let mut child = Command::new(BIN)
+            .args(["image", "pull", &reference])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn pull {reference}"))?;
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let s1 = sink.clone();
+        let s2 = sink.clone();
+
+        let t_out = tokio::spawn(async move {
+            if let Some(out) = stdout {
+                let mut lines = BufReader::new(out).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    push(&s1, line);
+                }
+            }
+        });
+        let t_err = tokio::spawn(async move {
+            if let Some(err) = stderr {
+                let mut lines = BufReader::new(err).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    push(&s2, line);
+                }
+            }
+        });
+
+        let status = child.wait().await?;
+        let _ = t_out.await;
+        let _ = t_err.await;
+
+        if status.success() {
+            push(&sink, format!("✓ pulled {reference}"));
+            Ok(())
+        } else {
+            let msg = format!("✗ pull failed ({status})");
+            push(&sink, msg.clone());
+            Err(anyhow!(msg))
+        }
+    })
+}
+
+fn push(sink: &Arc<Mutex<Vec<String>>>, line: String) {
+    if let Ok(mut v) = sink.lock() {
+        // Cap to avoid unbounded growth on a runaway pull.
+        if v.len() >= 2000 {
+            v.drain(0..1000);
+        }
+        v.push(line);
+    }
 }
