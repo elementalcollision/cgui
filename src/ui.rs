@@ -884,6 +884,23 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         format!(" {} ", app.status),
         Style::default().fg(Color::Black).bg(Color::White),
     )];
+    // Update-available chip(s). One per component that's behind, on the
+    // theme's info color so it doesn't collide with success/warning/danger.
+    for u in &app.updates {
+        let chip = format!(
+            " ⬆ {} {} → {} (cgui doctor) ",
+            u.component.label(),
+            u.installed,
+            u.latest
+        );
+        spans.push(Span::styled(
+            chip,
+            Style::default()
+                .fg(Color::Black)
+                .bg(app.theme.info)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     // Background-pull indicator: visible whenever a pull is running OR finished
     // but not currently focused, prompting the user to re-attach with `P`.
     if app.pull_attachable() && app.mode != Mode::PullProgress {

@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-pub fn run() -> i32 {
+pub async fn run() -> i32 {
     let mut all_ok = true;
     let isatty = std::io::IsTerminal::is_terminal(&std::io::stdout());
 
@@ -149,6 +149,30 @@ pub fn run() -> i32 {
             ok(isatty, &format!("trivy: {path} (image scan available)"));
         }
         _ => warn(isatty, "trivy not on PATH (image scan disabled — `brew install trivy`)"),
+    }
+
+    // 10. update check.
+    let mut prefs = crate::prefs::Prefs::load();
+    if prefs.auto_update_check == Some(false) {
+        warn(isatty, "update checks disabled (auto_update_check = false)");
+    } else {
+        let updates = crate::update::check(&mut prefs).await;
+        if updates.is_empty() {
+            ok(isatty, "all components up to date");
+        } else {
+            for u in &updates {
+                warn(
+                    isatty,
+                    &format!(
+                        "{} {} → {}   ({})",
+                        u.component.label(),
+                        u.installed,
+                        u.latest,
+                        u.release_url
+                    ),
+                );
+            }
+        }
     }
 
     println!();

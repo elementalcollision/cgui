@@ -219,6 +219,18 @@ The detail pane (Enter on a stack) shows per-service health probe results with t
 
 Stack files are watched via FSEvents on macOS. Editing a `*.toml` in `~/.config/cgui/stacks/` triggers an automatic reload — no need to press `r` or restart the TUI. New files appear immediately; deleted files vanish on the next refresh tick.
 
+### Update detection
+
+cgui checks for newer releases of Apple's `container` runtime and of cgui itself, once per startup, against the public GitHub Releases API. Results are cached in `state.json` for 24 hours.
+
+When something is behind, an `⬆ container 0.12.3 → 0.13.0` chip appears in the status bar (one per component). Run `cgui doctor` for the URL or `cgui update` for an ad-hoc fresh check (bypasses the cache).
+
+This is read-only — phase 1 only **detects** updates; nothing is downloaded or installed automatically.
+
+Disable entirely with `cgui --no-update` (persists `auto_update_check = false` in `state.json`). The opt-out is honoured by the background check and `cgui doctor`; the explicit `cgui update` subcommand always runs.
+
+Network: macOS's built-in `curl` is used so no extra dependency is added; calls are bounded by an 8-second timeout and skipped silently on failure.
+
 ### `cgui doctor`
 
 ```
@@ -349,6 +361,7 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | HTTP healthcheck kind                                 | ✅ shipped | 0.12.0         |
 | Per-service log multiplex (`L` on Stacks)             | ✅ shipped | 0.12.0         |
 | Trivy CVE search bar (`/` in results modal)           | ✅ shipped | 0.12.0         |
+| Update detection (status chip + `cgui doctor` row)    | ✅ shipped | 0.13.0         |
 | Optional GUI front end (Tauri)                        | 🟡 planned | —              |
 
 ## Roadmap

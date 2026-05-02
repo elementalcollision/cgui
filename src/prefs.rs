@@ -26,6 +26,14 @@ pub struct Prefs {
     /// Recently-built (context, tag) pairs, newest first, capped.
     #[serde(default)]
     pub recent_builds: Vec<RecentBuild>,
+    /// Whether to query GitHub Releases for newer versions of the runtime
+    /// and cgui itself. Default true; set to `false` for fully offline use.
+    pub auto_update_check: Option<bool>,
+    /// Unix-epoch seconds of the last successful update check.
+    pub last_update_check: Option<u64>,
+    /// Cached release snapshots, keyed by component label.
+    #[serde(default)]
+    pub update_cache: Vec<crate::update::CachedRelease>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

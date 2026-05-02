@@ -24,6 +24,20 @@ pub enum Event {
         message: String,
     },
     Status(String),
+    Updates(Vec<crate::update::UpdateInfo>),
+}
+
+/// Spawn a one-shot update check at startup. Future iterations will poll on
+/// an interval; phase 1 keeps it to a single startup probe so failures are
+/// silent and bounded.
+pub fn spawn_update_check(tx: UnboundedSender<Event>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut prefs = crate::prefs::Prefs::load();
+        let updates = crate::update::check(&mut prefs).await;
+        if !updates.is_empty() {
+            let _ = tx.send(Event::Updates(updates));
+        }
+    })
 }
 
 /// Spawn the FSEvents watcher in a blocking thread; events flow through `tx`.

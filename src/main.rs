@@ -11,6 +11,7 @@ mod stacks;
 mod theme;
 mod trivy;
 mod ui;
+mod update;
 mod watcher;
 
 use anyhow::Result;
@@ -33,7 +34,7 @@ use crate::app::{App, ContextAction, ContextMenu, Mode, OperationKind, Tab};
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = cli::Cli::parse();
-    if let Some(code) = cli::dispatch_cli(&cli)? {
+    if let Some(code) = cli::dispatch_cli(&cli).await? {
         std::process::exit(code);
     }
     run_tui().await
@@ -84,6 +85,7 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
         tokio::sync::mpsc::unbounded_channel::<watcher::Event>();
     let _fs_watcher = watcher::spawn_fs_watcher(watch_tx.clone());
     let _bg_handle = watcher::spawn_restart_health(watch_tx.clone());
+    let _update_handle = watcher::spawn_update_check(watch_tx.clone());
 
     while app.running {
         // Reap a finished refresh task — apply its result to App.
@@ -1199,6 +1201,17 @@ fn handle_watcher_event(app: &mut App, ev: watcher::Event) {
         }
         watcher::Event::Status(s) => {
             app.set_status(s);
+        }
+        watcher::Event::Updates(v) => {
+            if !v.is_empty() {
+                let summary = v
+                    .iter()
+                    .map(|u| format!("{} {}→{}", u.component.label(), u.installed, u.latest))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                app.set_status(format!("update available: {summary} · cgui doctor"));
+            }
+            app.updates = v;
         }
     }
 }

@@ -48,7 +48,7 @@ fn translate(verb: &str) -> Vec<&str> {
 
 /// Returns Some(exit_code) if a CLI command was handled; None to fall through
 /// to the TUI.
-pub fn dispatch_cli(cli: &Cli) -> Result<Option<i32>> {
+pub async fn dispatch_cli(cli: &Cli) -> Result<Option<i32>> {
     if cli.args.is_empty() {
         return Ok(None);
     }
@@ -57,10 +57,24 @@ pub fn dispatch_cli(cli: &Cli) -> Result<Option<i32>> {
         return Ok(None);
     }
     if verb == "doctor" {
-        return Ok(Some(crate::doctor::run()));
+        return Ok(Some(crate::doctor::run().await));
     }
     if verb == "import-compose" {
         return Ok(Some(import_compose(&cli.args[1..])));
+    }
+    if verb == "update" || verb == "updates" {
+        // Convenience: `cgui update` runs a fresh check (bypasses cache) and
+        // prints the result. Read-only — phase 1.
+        return Ok(Some(check_updates_cli().await));
+    }
+    if verb == "--no-update" {
+        // Recognised here so the dispatcher doesn't treat it as a runtime
+        // verb. Effective behaviour: persists the opt-out in prefs and exits.
+        let mut p = crate::prefs::Prefs::load();
+        p.auto_update_check = Some(false);
+        p.save();
+        eprintln!("cgui: update checks disabled (auto_update_check = false in state.json)");
+        return Ok(Some(0));
     }
     let mapped = translate(verb);
     let rest = &cli.args[1..];
@@ -159,5 +173,27 @@ fn import_compose(args: &[String]) -> i32 {
         return 1;
     }
     println!("wrote {}", target.display());
+    0
+}
+
+/// `cgui update` — force a fresh check and print findings. Bypasses the 24h
+/// cache by clearing it before calling. Read-only; never installs.
+async fn check_updates_cli() -> i32 {
+    let mut prefs = crate::prefs::Prefs::load();
+    prefs.update_cache.clear();
+    let updates = crate::update::check_force(&mut prefs).await;
+    if updates.is_empty() {
+        println!("cgui: all components up to date");
+        return 0;
+    }
+    for u in &updates {
+        println!(
+            "⬆ {:<10} {} → {}   ({})",
+            u.component.label(),
+            u.installed,
+            u.latest,
+            u.release_url
+        );
+    }
     0
 }

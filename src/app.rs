@@ -291,6 +291,11 @@ pub struct App {
     /// Healthcheck state per (stack, service). Driven by the background
     /// healthcheck/restart task.
     pub health: HashMap<(String, String), HealthEntry>,
+
+    /// Available upgrades for runtime / cgui itself, populated by the
+    /// background update-check task. Empty unless `prefs.auto_update_check`
+    /// is true and a newer release exists.
+    pub updates: Vec<crate::update::UpdateInfo>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -409,6 +414,7 @@ impl App {
             trivy_search_active: false,
             trivy_json: Arc::new(Mutex::new(String::new())),
             health: HashMap::new(),
+            updates: Vec::new(),
         }
     }
 
