@@ -437,10 +437,38 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 
 ## Roadmap
 
-- Optional GUI front end (Tauri) sharing the same `container.rs` core
-- HTTPS healthcheck (currently plain HTTP only)
-- Live diff view between stack file on disk and running containers
-- Stack templates / presets (`cgui new myapp --template postgres+api`)
+The previous roadmap (HTTPS healthcheck · live stack diff · stack templates) shipped in 0.14.0 — see the progress table above. The next backlog comes from the post-0.14 project review and is grouped by priority.
+
+### High priority
+
+- **CI on push + tag** — `.github/workflows/` for `cargo test --release` + `cargo clippy -- -D warnings` on every push, `cargo fmt --check`, and a release workflow that builds **both** `cgui-aarch64-apple-darwin.tar.gz` and `cgui-x86_64-apple-darwin.tar.gz` and uploads them as assets on tag push (Intel Mac users currently can't self-update).
+- **Integration test for the update modal flow** — phases 1–5 are live but never exercised end-to-end (we're always on `latest`). A test that constructs an `App` with a synthetic `UpdateInfo` and walks `U` / `D` / `L` / `Esc` / cycling through `handle_key` would verify the dispatch table.
+- **Real-binary smoke test** — `tests/smoke.rs` invoking the release binary with `cgui doctor`, `cgui templates`, `cgui update` and asserting exit codes + key strings.
+- **Apple `container --progress=plain` output** — released in `0.12.0`. Tighten `pullprog::parse_progress` against the format Apple ships rather than the heuristics that predated it.
+
+### Medium priority
+
+- **Refactor `main.rs` (1,775 LOC) and `ui.rs` (1,725 LOC)** — split into `events::{keys, mouse}`, `actions/*`, and `ui/overlays/*`. Defer until the next feature cycle creates real friction.
+- **Status-bar message TTL** — dim after 5 s, drop after 30 s back to `default_status()`. `app.status_set_at` is already tracked; just plumb it.
+- **Persist `dismissed_updates` across sessions** — optionally store `[updates] dismissed = ["container@0.13.0"]` in `state.json`, auto-clear when a newer version supersedes the dismissed one.
+- **`cgui doctor --json` / `--quiet`** — machine-readable output for CI / pre-commit / shell pipelines.
+- **`compose import` strict mode** — surface dropped keys (`build:`, `secrets:`, `configs:`, `deploy:`, `cap_add:`, etc.) on stderr; `--strict` errors out.
+
+### Low priority / nice to have
+
+- **Stack `cap_add` passthrough** — needed for anything wanting `NET_ADMIN`, etc.
+- **`--profile <name>` CLI override** — one-shot runtime swap without flipping the saved profile.
+- **Stack diff: detect orphan containers** — list containers whose name starts with `<stack>_` but doesn't match any current service.
+- **Pull/build modal: copy buffer to `pbcopy`** — `y` keybinding for sharing logs.
+- **Healthcheck `start_period_s`** — compose-style grace before the first probe is allowed to fail.
+- **Per-tab refresh cadence** — skip the 2 s refresh while on the Logs tab with a follow stream active.
+
+### Out of scope (deliberately not planned)
+
+- **Tauri GUI** — sharing `container.rs` between two front ends never stays in sync. Removed from the roadmap unless a maintainer steps up.
+- **Compose `build:` field** — that's a build orchestrator, not a runner. Use `b` then reference the tag.
+- **Daemon for update checks** — the current "one check at startup + 24 h cache" is correct. A launchd plist would add complexity for negligible UX gain.
+- **Plugin system** — premature for an 8.7 k LOC tool.
 
 ## License
 
