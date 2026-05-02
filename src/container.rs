@@ -17,6 +17,19 @@ fn bin() -> String {
     crate::runtime::binary()
 }
 
+/// True when the active runtime is Apple's `container` CLI (vs docker /
+/// podman / nerdctl, where flags like `--progress=plain` aren't supported
+/// or take different forms). We detect by basename so an absolute path
+/// like `/usr/local/bin/container` still matches.
+fn is_apple_container() -> bool {
+    let b = bin();
+    let basename = std::path::Path::new(&b)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&b);
+    basename == "container"
+}
+
 #[derive(Debug, Clone)]
 pub struct Container {
     pub id: String,
@@ -669,9 +682,22 @@ pub fn spawn_pull(
     sink: Arc<Mutex<Vec<String>>>,
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
-        push(&sink, format!("$ container image pull {reference}"));
+        // `--progress=plain` was added in Apple container 0.12.0 and gives
+        // us a stable line-based grammar parseable by `pullprog`. Other
+        // runtimes (docker pull, podman pull, nerdctl pull) don't support
+        // it and would error, so we gate by binary basename. The parser
+        // falls back to its bare-`N/M` heuristics on those runtimes.
+        let mut argv: Vec<&str> = vec!["image", "pull"];
+        if is_apple_container() {
+            argv.push("--progress=plain");
+        }
+        argv.push(&reference);
+        push(
+            &sink,
+            format!("$ {} {}", bin(), argv.join(" ")),
+        );
         let mut child = Command::new(bin())
-            .args(["image", "pull", &reference])
+            .args(&argv)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -723,7 +749,13 @@ pub fn spawn_build(
     sink: Arc<Mutex<Vec<String>>>,
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
+        // `--progress=plain` works for Apple container 0.12+ and for
+        // `docker build` (buildx default), but not for podman or nerdctl
+        // build. Gate to keep things portable across the runtime profile.
         let mut args: Vec<String> = vec!["build".into()];
+        if is_apple_container() {
+            args.push("--progress=plain".into());
+        }
         if let Some(ref t) = tag {
             args.push("-t".into());
             args.push(t.clone());
