@@ -84,6 +84,8 @@ pub enum Mode {
     /// Phase-2 update prompt: shows release notes and lets the user dismiss
     /// or open the release URL. No download/install yet.
     UpdatePrompt,
+    /// Live diff between a stack file and the running containers.
+    StackDiff,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -315,6 +317,11 @@ pub struct App {
     /// phase 4 (`installer`) and surfaced in the status bar after `[D]ownload`.
     pub download_result: Arc<Mutex<Option<std::path::PathBuf>>>,
 
+    /// Live-diff modal state.
+    pub stack_diff_rows: Vec<crate::stacks::DiffRow>,
+    pub stack_diff_target: Option<String>,   // stack name being diffed
+    pub stack_diff_scroll: u16,
+
     /// True when `[I]nstall` queued a download — the reaper triggers the
     /// install dance as soon as the download lands. Cleared after attempt.
     pub install_after_download: bool,
@@ -445,6 +452,9 @@ impl App {
             update_modal_idx: 0,
             update_notes_scroll: 0,
             download_result: Arc::new(Mutex::new(None)),
+            stack_diff_rows: Vec::new(),
+            stack_diff_target: None,
+            stack_diff_scroll: 0,
             install_after_download: false,
             install_component: None,
             install_expected: None,

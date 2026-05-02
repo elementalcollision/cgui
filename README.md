@@ -182,6 +182,29 @@ In the TUI: `u` brings the stack up (`container run -d --name <stack>_<service> 
 
 A starter `example.toml` is dropped on first run. The Stacks tab's `Enter` opens a detail pane showing the parsed services and the exact `container run` plan.
 
+#### Templates and `cgui new`
+
+```bash
+cgui templates                         # list built-in templates
+cgui new myapp --template postgres+api # scaffold ~/.config/cgui/stacks/myapp.toml
+cgui new cache  --template redis
+cgui new web    --template nginx
+cgui new minimal                       # default: blank
+```
+
+Built-in templates: `blank`, `postgres`, `postgres+api`, `redis`, `nginx`. Each is a hand-tuned starting point with sane healthchecks, restart policy, and per-stack volume names interpolated from the stack name. Editing afterwards is expected — templates aren't a generator, just a head start. Errors out on collision so you can't clobber an existing stack.
+
+#### Live diff (`=`)
+
+Press `=` on a Stacks row to compute a **live diff** between the TOML on disk and the actual running containers. cgui calls `container inspect <stack>_<service>` for each service and compares: image reference, published ports (sorted), per-key env, attached network, plus container status. The modal shows:
+
+- `✓ field          value` when TOML matches runtime
+- `⚠ field          expected X / actual Y` when they drift
+- `✗ missing        no container — u to bring up` when the service has never been run
+- `! status         exited` when the container exists but isn't running
+
+Title shows a `<matched>/<total>` counter; the border colors green when everything matches, yellow otherwise. Useful for catching "I edited the TOML but forgot to `D` then `u`" drift, or seeing which env vars from the running container differ from your declarations.
+
 #### Restart policy + healthchecks
 
 Each service can declare a `restart` policy and a `healthcheck` block:
@@ -204,9 +227,10 @@ interval_s = 30             # default 30
 For `kind = "http"` the `target` accepts:
 - a bare port (`"8080"`) — probes `http://127.0.0.1:8080/`
 - `PORT/PATH` (`"8080/healthz"`) — probes `http://127.0.0.1:8080/healthz`
-- a full URL (`"http://example.com:8080/v1/ping"`) — used verbatim
+- a full HTTP URL (`"http://example.com:8080/v1/ping"`) — hand-rolled HTTP/1.0 client over `tokio::TcpStream`, no extra deps
+- a full **HTTPS URL** (`"https://example.com/v1/ping"`) — shells out to `curl --silent --max-time 2 -o /dev/null -w "%{http_code}"` so we get TLS without pulling in `rustls`/`native-tls`. macOS `curl` covers it.
 
-Probes use a tiny built-in HTTP/1.0 client (no extra deps, no TLS); success is any status in `expect_status[0]..=expect_status[1]`, defaulting to `200..399`.
+Success is any status in `expect_status[0]..=expect_status[1]`, defaulting to `200..399`.
 
 A background loop (every ~10 s) checks each service's container state. If the policy is `always`, any stopped/exited container is restarted; `on-failure` only restarts on a non-zero exit. The `HEALTH` and `RESTART` columns on the Stacks tab show the rolled-up state per stack:
 
@@ -406,6 +430,9 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | Update download (`[D]`) to `~/Library/Caches/cgui/`   | ✅ shipped | 0.13.2         |
 | Update install (`[I]`) — sudo installer / brew + verify | ✅ shipped | 0.13.3       |
 | cgui self-update — atomic-replace / brew / cargo hint | ✅ shipped | 0.13.4         |
+| Stack templates + `cgui new`                          | ✅ shipped | 0.14.0         |
+| HTTPS healthcheck (`https://…` target via `curl`)     | ✅ shipped | 0.14.0         |
+| Live stack diff (`=` on Stacks tab)                   | ✅ shipped | 0.14.0         |
 | Optional GUI front end (Tauri)                        | 🟡 planned | —              |
 
 ## Roadmap

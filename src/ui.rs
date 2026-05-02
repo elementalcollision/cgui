@@ -54,6 +54,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::PromptStackName => draw_stack_name_prompt(f, app, area),
         Mode::TrivyResult => draw_trivy_result(f, app, area),
         Mode::UpdatePrompt => draw_update_prompt(f, app, area),
+        Mode::StackDiff => draw_stack_diff(f, app, area),
         Mode::Browse | Mode::Filter | Mode::LogSearch => {}
     }
 }
@@ -1083,6 +1084,8 @@ fn draw_help_overlay(f: &mut Frame, app: &App, area: Rect) {
             lines.push(h("L", "Multi-follow logs from EVERY service (prefixed)"));
             lines.push(h("n", "New stack (template + open in $EDITOR)"));
             lines.push(h("E", "Edit selected stack in $EDITOR"));
+            lines.push(h("=", "Diff: TOML vs running containers (live inspect)"));
+            lines.push(h("CLI", "`cgui new <name> --template postgres+api`"));
             lines.push(h("auto", "Stack files reload on disk change (FSEvents)"));
             lines.push(h("auto", "restart=always|on-failure re-runs stopped svcs"));
             lines.push(h("auto", "[service.healthcheck] kind=tcp|cmd · interval_s"));
@@ -1592,6 +1595,129 @@ fn draw_update_prompt(f: &mut Frame, app: &App, area: Rect) {
 fn short_date(s: &str) -> String {
     // "2026-04-30T17:55:36Z" → "2026-04-30"
     s.split('T').next().unwrap_or(s).to_string()
+}
+
+fn draw_stack_diff(f: &mut Frame, app: &App, area: Rect) {
+    let r = centered(area, 90, 80);
+    f.render_widget(Clear, r);
+    let target = app.stack_diff_target.as_deref().unwrap_or("?");
+    let total = app.stack_diff_rows.len();
+    let mismatches = app
+        .stack_diff_rows
+        .iter()
+        .filter(|r| !matches!(r, crate::stacks::DiffRow::Match { .. }))
+        .count();
+    let title = format!(
+        " Diff · {} · {}/{} matched · ↑↓ scroll · Esc close ",
+        target,
+        total - mismatches,
+        total
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if mismatches == 0 {
+            app.theme.success
+        } else {
+            app.theme.warning
+        }))
+        .title(Span::styled(
+            title,
+            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(total + 1);
+    let mut last_service: Option<String> = None;
+    for row in &app.stack_diff_rows {
+        let svc = match row {
+            crate::stacks::DiffRow::Match { service, .. } => service,
+            crate::stacks::DiffRow::Differ { service, .. } => service,
+            crate::stacks::DiffRow::Missing { service, .. } => service,
+            crate::stacks::DiffRow::NotRunning { service, .. } => service,
+        };
+        if last_service.as_deref() != Some(svc) {
+            if last_service.is_some() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(Span::styled(
+                format!("[{svc}]"),
+                Style::default().fg(app.theme.info).add_modifier(Modifier::BOLD),
+            )));
+            last_service = Some(svc.clone());
+        }
+        match row {
+            crate::stacks::DiffRow::Match { field, value, .. } => {
+                lines.push(Line::from(vec![
+                    Span::styled("  ✓ ", Style::default().fg(app.theme.success)),
+                    Span::styled(format!("{field:<14}"), Style::default().fg(app.theme.muted)),
+                    Span::raw(value.clone()),
+                ]));
+            }
+            crate::stacks::DiffRow::Differ {
+                field, expected, actual, ..
+            } => {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "  ⚠ ",
+                        Style::default().fg(app.theme.warning).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("{field:<14}"), Style::default().fg(app.theme.muted)),
+                    Span::styled("expected ", Style::default().fg(app.theme.muted)),
+                    Span::styled(
+                        if expected.is_empty() { "<empty>".to_string() } else { expected.clone() },
+                        Style::default().fg(app.theme.success),
+                    ),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::raw("                     "),
+                    Span::styled("actual   ", Style::default().fg(app.theme.muted)),
+                    Span::styled(
+                        if actual.is_empty() { "<empty>".to_string() } else { actual.clone() },
+                        Style::default().fg(app.theme.danger),
+                    ),
+                ]));
+            }
+            crate::stacks::DiffRow::Missing { expected_image, .. } => {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "  ✗ ",
+                        Style::default().fg(app.theme.danger).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("missing       ", Style::default().fg(app.theme.muted)),
+                    Span::styled(
+                        "no container — `u` to bring up",
+                        Style::default().fg(app.theme.muted),
+                    ),
+                ]));
+                lines.push(Line::from(vec![
+                    Span::raw("                     "),
+                    Span::styled("expected_image ", Style::default().fg(app.theme.muted)),
+                    Span::styled(expected_image.clone(), Style::default().fg(app.theme.info)),
+                ]));
+            }
+            crate::stacks::DiffRow::NotRunning { status, .. } => {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "  ! ",
+                        Style::default().fg(app.theme.warning).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("status        ", Style::default().fg(app.theme.muted)),
+                    Span::styled(status.clone(), Style::default().fg(app.theme.warning)),
+                ]));
+            }
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(no diff data)",
+            Style::default().fg(app.theme.muted),
+        )));
+    }
+    let p = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((app.stack_diff_scroll, 0));
+    f.render_widget(p, inner);
 }
 
 fn short_digest(d: &str) -> String {

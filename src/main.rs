@@ -555,6 +555,28 @@ async fn handle_key<B: ratatui::backend::Backend>(
             }
             return Ok(());
         }
+        Mode::StackDiff => {
+            match code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                    app.mode = Mode::Browse;
+                    app.stack_diff_scroll = 0;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    app.stack_diff_scroll = app.stack_diff_scroll.saturating_add(1);
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    app.stack_diff_scroll = app.stack_diff_scroll.saturating_sub(1);
+                }
+                KeyCode::PageDown => {
+                    app.stack_diff_scroll = app.stack_diff_scroll.saturating_add(10);
+                }
+                KeyCode::PageUp => {
+                    app.stack_diff_scroll = app.stack_diff_scroll.saturating_sub(10);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
         Mode::UpdatePrompt => {
             let visible_n = app.visible_updates().len();
             match code {
@@ -1117,6 +1139,7 @@ async fn handle_key<B: ratatui::backend::Backend>(
             app.set_status("Type a stack name (no extension), Enter to create");
         }
         KeyCode::Char('E') if app.tab == Tab::Stacks => edit_stack(term, app).await?,
+        KeyCode::Char('=') if app.tab == Tab::Stacks => stack_diff(app).await,
         KeyCode::Char(' ') if app.tab == Tab::Containers => {
             app.toggle_mark_current_container();
             app.move_down();
@@ -1272,6 +1295,20 @@ fn start_follow_multi(
     app.log_following = true;
     *log_handle = Some(container::spawn_logs_multi(targets, app.logs_buf.clone()));
     app.set_status(format!("multi-following {label} (F on Logs to stop)"));
+}
+
+async fn stack_diff(app: &mut App) {
+    let Some(stack) = app.current_stack() else {
+        app.set_status("No stack selected.");
+        return;
+    };
+    app.set_status(format!("diffing {}…", stack.name));
+    let rows = stacks::diff_against_runtime(&stack).await;
+    app.stack_diff_rows = rows;
+    app.stack_diff_target = Some(stack.name.clone());
+    app.stack_diff_scroll = 0;
+    app.mode = Mode::StackDiff;
+    app.set_status(format!("diff: {}", stack.name));
 }
 
 async fn stack_logs_multi(

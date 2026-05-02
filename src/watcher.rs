@@ -195,22 +195,27 @@ async fn probe_tcp(svc: &Service, hc: &Healthcheck) -> (bool, String) {
     }
 }
 
-/// HTTP healthcheck. `target` accepts:
-///   * `"PORT"`            → http://127.0.0.1:PORT/
-///   * `"PORT/PATH"`       → http://127.0.0.1:PORT/PATH
-///   * `"http://host:port/path"` → used verbatim (https not supported here)
+/// HTTP / HTTPS healthcheck. `target` accepts:
+///   * `"PORT"`              → http://127.0.0.1:PORT/
+///   * `"PORT/PATH"`         → http://127.0.0.1:PORT/PATH
+///   * `"http://host:port/path"`  → plain HTTP/1.0, hand-rolled client
+///   * `"https://host:port/path"` → shell out to `curl --silent --max-time 2 -o /dev/null -w "%{http_code}"`
 ///
 /// Success = response status is in `expect_status[0]..=expect_status[1]`,
-/// or 200..399 if not specified. We talk minimal HTTP/1.0 against a
-/// `tokio::net::TcpStream`, no TLS, no extra dependency.
+/// or 200..399 if not specified. We avoid pulling in a TLS dependency by
+/// reusing macOS's built-in `curl` for the HTTPS branch — same approach
+/// the update module uses for GitHub API calls.
 async fn probe_http(svc: &Service, hc: &Healthcheck) -> (bool, String) {
     let raw = match hc.target.as_deref() {
         Some(t) if !t.is_empty() => t.to_string(),
         _ => match svc.ports.first() {
             Some(p) => p.split(':').next().unwrap_or("").to_string(),
-            None => return (false, "no http target and no published port".into()),
+            None => return (false, "no http/https target and no published port".into()),
         },
     };
+    if raw.starts_with("https://") {
+        return probe_https_via_curl(&raw, hc).await;
+    }
     let (host, port, path) = parse_http_target(&raw);
     let addr = format!("{host}:{port}");
     let timeout = Duration::from_secs(2);
@@ -259,6 +264,36 @@ async fn probe_http(svc: &Service, hc: &Healthcheck) -> (bool, String) {
         Some(c) if c >= lo && c <= hi => (true, format!("http {addr}{path} → {c}")),
         Some(c) => (false, format!("http {addr}{path} → {c} (expected {lo}-{hi})")),
         None => (false, format!("http {addr}{path}: malformed response: {first}")),
+    }
+}
+
+/// HTTPS branch via `curl`. Returns just the status code; we don't bother
+/// reading the body. `--max-time 2` keeps us bounded; `-o /dev/null` drops
+/// the body to avoid slurping large responses into memory.
+async fn probe_https_via_curl(url: &str, hc: &Healthcheck) -> (bool, String) {
+    let timeout = std::time::Duration::from_secs(3);
+    let fut = tokio::process::Command::new("curl")
+        .args([
+            "-s", "-S", "--max-time", "2", "-o", "/dev/null",
+            "-w", "%{http_code}", url,
+        ])
+        .output();
+    let out = match tokio::time::timeout(timeout, fut).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return (false, format!("https {url}: spawn {e}")),
+        Err(_) => return (false, format!("https {url}: outer timeout")),
+    };
+    let status_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() && status_str.is_empty() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return (false, format!("https {url}: curl {err}"));
+    }
+    let code: Option<u16> = status_str.parse().ok();
+    let (lo, hi) = expected_range(hc);
+    match code {
+        Some(c) if c >= lo && c <= hi => (true, format!("https {url} → {c}")),
+        Some(c) => (false, format!("https {url} → {c} (expected {lo}-{hi})")),
+        None => (false, format!("https {url}: malformed status {status_str:?}")),
     }
 }
 

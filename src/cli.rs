@@ -62,6 +62,12 @@ pub async fn dispatch_cli(cli: &Cli) -> Result<Option<i32>> {
     if verb == "import-compose" {
         return Ok(Some(import_compose(&cli.args[1..])));
     }
+    if verb == "new" {
+        return Ok(Some(new_stack(&cli.args[1..])));
+    }
+    if verb == "templates" {
+        return Ok(Some(list_templates()));
+    }
     if verb == "update" || verb == "updates" {
         // Convenience: `cgui update` runs a fresh check (bypasses cache) and
         // prints the result. Read-only — phase 1.
@@ -173,6 +179,60 @@ fn import_compose(args: &[String]) -> i32 {
         return 1;
     }
     println!("wrote {}", target.display());
+    0
+}
+
+/// `cgui new <name> [--template <kind>]` — scaffold a stack file from a
+/// built-in template. Writes to `~/.config/cgui/stacks/<name>.toml`. Errors
+/// if the file already exists or the template isn't known.
+fn new_stack(args: &[String]) -> i32 {
+    if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
+        eprintln!("usage: cgui new <name> [--template <kind>]");
+        eprintln!("       cgui templates    # list available templates");
+        return 2;
+    }
+    let name = args[0].clone();
+    let mut template: Option<String> = None;
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--template" | "-t" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("--template needs a value (try `cgui templates`)");
+                    return 2;
+                }
+                template = Some(args[i].clone());
+            }
+            other => {
+                eprintln!("unknown flag: {other}");
+                return 2;
+            }
+        }
+        i += 1;
+    }
+    match crate::stacks::create_from_template(&name, template.as_deref()) {
+        Ok(p) => {
+            println!("created {}", p.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("new: {e}");
+            1
+        }
+    }
+}
+
+fn list_templates() -> i32 {
+    let mut max_name = 0;
+    for t in crate::stacks::TEMPLATES {
+        max_name = max_name.max(t.name.len());
+    }
+    for t in crate::stacks::TEMPLATES {
+        println!("  {:<width$}  {}", t.name, t.description, width = max_name);
+    }
+    println!();
+    println!("usage: cgui new <name> --template <kind>");
     0
 }
 

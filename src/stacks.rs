@@ -316,6 +316,336 @@ image = "docker.io/library/alpine:latest"
     Ok(p)
 }
 
+// --- Stack templates: scaffolds for `cgui new <name> --template <kind>`.
+//
+// Each template is a TOML body string with a `{name}` placeholder for the
+// stack name. We deliberately don't ship a templating engine — these are
+// short, hand-tuned starting points the user is expected to edit.
+
+pub struct Template {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub body: &'static str,
+}
+
+pub const TEMPLATES: &[Template] = &[
+    Template {
+        name: "blank",
+        description: "Single Alpine service skeleton",
+        body: r#"# {name}: blank single-service template
+name = "{name}"
+
+[[service]]
+name = "app"
+image = "docker.io/library/alpine:latest"
+# args = ["sh", "-c", "while true; do date; sleep 5; done"]
+# env = { KEY = "value" }
+# ports = ["8080:80"]
+# restart = "always"
+"#,
+    },
+    Template {
+        name: "postgres",
+        description: "Postgres + pgvector with healthcheck",
+        body: r#"# {name}: postgres single-service stack
+name = "{name}"
+
+[[service]]
+name = "db"
+image = "docker.io/pgvector/pgvector:pg16"
+env = { POSTGRES_USER = "app", POSTGRES_PASSWORD = "app", POSTGRES_DB = "app" }
+ports = ["15432:5432"]
+volumes = ["{name}-pgdata:/var/lib/postgresql/data"]
+restart = "always"
+
+[service.healthcheck]
+kind = "tcp"
+target = "15432"
+interval_s = 30
+"#,
+    },
+    Template {
+        name: "postgres+api",
+        description: "Postgres + an API skeleton with depends_on",
+        body: r#"# {name}: postgres + api stack — replace api image with your build
+name = "{name}"
+
+[[service]]
+name = "db"
+image = "docker.io/pgvector/pgvector:pg16"
+env = { POSTGRES_USER = "app", POSTGRES_PASSWORD = "app", POSTGRES_DB = "app" }
+ports = ["15432:5432"]
+volumes = ["{name}-pgdata:/var/lib/postgresql/data"]
+restart = "always"
+
+[service.healthcheck]
+kind = "tcp"
+target = "15432"
+
+[[service]]
+name = "api"
+image = "docker.io/library/alpine:latest"   # replace with your image
+depends_on = ["db"]
+network = "default"
+ports = ["8080:8080"]
+env = { DATABASE_URL = "postgres://app:app@host.docker.internal:15432/app" }
+restart = "on-failure"
+
+[service.healthcheck]
+kind = "http"
+target = "8080/healthz"
+interval_s = 30
+"#,
+    },
+    Template {
+        name: "redis",
+        description: "Redis cache",
+        body: r#"# {name}: redis stack
+name = "{name}"
+
+[[service]]
+name = "cache"
+image = "docker.io/library/redis:7-alpine"
+ports = ["16379:6379"]
+volumes = ["{name}-redis:/data"]
+restart = "always"
+
+[service.healthcheck]
+kind = "cmd"
+command = ["redis-cli", "ping"]
+interval_s = 30
+"#,
+    },
+    Template {
+        name: "nginx",
+        description: "Nginx web server with bind-mountable conf",
+        body: r#"# {name}: nginx stack
+name = "{name}"
+
+[[service]]
+name = "web"
+image = "docker.io/library/nginx:1.27-alpine"
+ports = ["8080:80"]
+# volumes = ["./nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+restart = "always"
+
+[service.healthcheck]
+kind = "http"
+target = "8080/"
+expect_status = [200, 404]
+"#,
+    },
+];
+
+pub fn template_by_name(s: &str) -> Option<&'static Template> {
+    TEMPLATES.iter().find(|t| t.name == s)
+}
+
+// --- Live diff: stack TOML vs running container ---
+
+/// One row in the diff: a single (kind, expected, actual) triple.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffRow {
+    /// Container exists, field matches the stack file.
+    Match { service: String, field: String, value: String },
+    /// Container exists, field differs.
+    Differ {
+        service: String,
+        field: String,
+        expected: String,
+        actual: String,
+    },
+    /// Container doesn't exist for this service at all.
+    Missing { service: String, expected_image: String },
+    /// Container exists but isn't running.
+    NotRunning { service: String, status: String },
+}
+
+/// Compare what a stack file declares against what the runtime reports for
+/// each `<stack>_<service>` container. Async because each service triggers
+/// a `container inspect` call. Errors during inspect become Missing rows.
+pub async fn diff_against_runtime(stack: &Stack) -> Vec<DiffRow> {
+    let mut rows = Vec::new();
+    for svc in &stack.services {
+        let cname = container_name(&stack.name, &svc.name);
+        let actual = match inspect_container(&cname).await {
+            Some(v) => v,
+            None => {
+                rows.push(DiffRow::Missing {
+                    service: svc.name.clone(),
+                    expected_image: svc.image.clone(),
+                });
+                continue;
+            }
+        };
+
+        // Status row first — sets context for the rest.
+        let status = actual
+            .get("status")
+            .and_then(|x| x.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        if status != "running" {
+            rows.push(DiffRow::NotRunning {
+                service: svc.name.clone(),
+                status: status.clone(),
+            });
+        }
+
+        let cfg = actual.get("configuration").cloned().unwrap_or_default();
+
+        // image
+        let actual_image = cfg
+            .get("image")
+            .and_then(|i| i.get("reference"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        push_compare(
+            &mut rows,
+            &svc.name,
+            "image",
+            &svc.image,
+            &actual_image,
+        );
+
+        // ports — sort both sides and compare as lists
+        let actual_ports = cfg
+            .get("publishedPorts")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                let mut v: Vec<String> = arr
+                    .iter()
+                    .map(|p| {
+                        let host = p.get("hostPort").and_then(|x| x.as_u64()).unwrap_or(0);
+                        let cont = p.get("containerPort").and_then(|x| x.as_u64()).unwrap_or(0);
+                        format!("{host}:{cont}")
+                    })
+                    .collect();
+                v.sort();
+                v
+            })
+            .unwrap_or_default();
+        let mut expected_ports = svc.ports.clone();
+        expected_ports.sort();
+        push_compare(
+            &mut rows,
+            &svc.name,
+            "ports",
+            &expected_ports.join(", "),
+            &actual_ports.join(", "),
+        );
+
+        // env — extract KEY=VALUE pairs from initProcess.environment, intersect on KEY
+        let actual_env: std::collections::BTreeMap<String, String> = cfg
+            .get("initProcess")
+            .and_then(|p| p.get("environment"))
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (k, expected) in &svc.env {
+            let actual = actual_env.get(k).cloned().unwrap_or_default();
+            push_compare(
+                &mut rows,
+                &svc.name,
+                &format!("env[{k}]"),
+                expected,
+                &actual,
+            );
+        }
+
+        // network — first attached
+        let actual_net = cfg
+            .get("networks")
+            .and_then(|x| x.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|n| n.get("network"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if let Some(expected_net) = &svc.network {
+            push_compare(&mut rows, &svc.name, "network", expected_net, &actual_net);
+        }
+    }
+    rows
+}
+
+fn push_compare(
+    rows: &mut Vec<DiffRow>,
+    service: &str,
+    field: &str,
+    expected: &str,
+    actual: &str,
+) {
+    if expected == actual {
+        rows.push(DiffRow::Match {
+            service: service.to_string(),
+            field: field.to_string(),
+            value: expected.to_string(),
+        });
+    } else {
+        rows.push(DiffRow::Differ {
+            service: service.to_string(),
+            field: field.to_string(),
+            expected: expected.to_string(),
+            actual: actual.to_string(),
+        });
+    }
+}
+
+async fn inspect_container(name: &str) -> Option<serde_json::Value> {
+    let bin = crate::runtime::binary();
+    let out = tokio::process::Command::new(bin)
+        .args(["inspect", name])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    let arr = v.as_array()?;
+    arr.first().cloned()
+}
+
+/// Render the chosen template with `{name}` interpolated.
+pub fn render_template(t: &Template, name: &str) -> String {
+    t.body.replace("{name}", name)
+}
+
+/// Create a new stack file from a named template (or "blank" if unspecified).
+/// Errors if the destination already exists or if `name` contains characters
+/// not safe for a filename (alnum / `-` / `_`).
+pub fn create_from_template(name: &str, template_name: Option<&str>) -> Result<PathBuf> {
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err(anyhow!(
+            "stack name must be ASCII alphanumeric, '-', or '_' (got: {name:?})"
+        ));
+    }
+    let t_name = template_name.unwrap_or("blank");
+    let template = template_by_name(t_name).ok_or_else(|| {
+        anyhow!(
+            "unknown template: {t_name}. Known: {}",
+            TEMPLATES.iter().map(|x| x.name).collect::<Vec<_>>().join(", ")
+        )
+    })?;
+    let Some(dir) = stacks_dir() else {
+        return Err(anyhow!("no XDG_CONFIG_HOME or HOME — can't write stack"));
+    };
+    std::fs::create_dir_all(&dir).context("create stacks dir")?;
+    let p = dir.join(format!("{name}.toml"));
+    if p.exists() {
+        return Err(anyhow!("stack '{name}' already exists at {}", p.display()));
+    }
+    std::fs::write(&p, render_template(template, name)).context("write stack from template")?;
+    Ok(p)
+}
+
 /// Best-effort: write a sample stack file the first time the user opens the
 /// Stacks tab and it's empty, so they have something to play with.
 pub fn ensure_sample() -> Result<Option<PathBuf>> {
