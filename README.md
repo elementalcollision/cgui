@@ -231,11 +231,18 @@ When something is behind, an `⬆ container 0.12.3 → 0.13.0 · U to view` chip
 Inside the modal:
 
 - `O` opens the release URL in your default browser (`open <url>` on macOS)
+- `D` **downloads** the signed installer `.pkg` to `~/Library/Caches/cgui/` — see below
 - `L` dismisses *that component* for the rest of the session (the chip vanishes; comes back next launch)
 - `←` / `→` (or `n` / `p`) cycle if multiple components are behind
 - `Esc` closes the modal
 
-Still read-only — nothing is downloaded or installed yet.
+#### `[D]ownload`
+
+Spawns `curl -fL --silent` for the release's `*-installer-signed.pkg` asset (the **signed** variant only — cgui deliberately refuses the unsigned `.pkg` so the install path stays safe by default). Writes to `~/Library/Caches/cgui/<asset-name>` via a `.part` tempfile that's atomically renamed on success; partial downloads are removed on any failure or size mismatch.
+
+Progress streams into the same modal we use for pull/build/scan: a "Downloading container 0.13.0…" header plus a once-a-second `12.4 MiB / 68.0 MiB (18.2%)` line. Cache reuse is automatic — re-running `[D]` on a release whose `.pkg` is already in the cache (and matches the API-reported size exactly) skips the download and reports `✓ cached at <path>` immediately.
+
+Phase 4 will use the cached path to invoke `sudo installer -pkg <path> -target /`. Phase 3 stops at "downloaded" — nothing is run with elevated privileges.
 
 `cgui doctor` includes the same information without launching the TUI; `cgui update` forces a fresh API hit (bypasses the 24h cache and the opt-out).
 
@@ -375,6 +382,7 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | Trivy CVE search bar (`/` in results modal)           | ✅ shipped | 0.12.0         |
 | Update detection (status chip + `cgui doctor` row)    | ✅ shipped | 0.13.0         |
 | Update prompt modal (`U`, `[O]pen`, `[L]ater`)        | ✅ shipped | 0.13.1         |
+| Update download (`[D]`) to `~/Library/Caches/cgui/`   | ✅ shipped | 0.13.2         |
 | Optional GUI front end (Tauri)                        | 🟡 planned | —              |
 
 ## Roadmap

@@ -43,6 +43,18 @@ pub struct UpdateInfo {
     /// Release notes body, trimmed and capped. Empty if the API didn't
     /// return one or it failed to decode as UTF-8.
     pub notes: String,
+    /// The signed `.pkg` asset for this release, if one exists. Phase 3
+    /// uses this for download; phase 4 will use it for `installer`.
+    pub asset: Option<SignedAsset>,
+}
+
+/// Metadata for the signed installer we'll download (and later install).
+/// Stored in CachedRelease so reuse decisions don't need a fresh API hit.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct SignedAsset {
+    pub name: String,
+    pub url: String,
+    pub size: u64,
 }
 
 /// Cached snapshot of one component's most recent check. Persisted in
@@ -56,6 +68,8 @@ pub struct CachedRelease {
     pub fetched_at: u64,          // unix seconds
     #[serde(default)]
     pub notes: String,
+    #[serde(default)]
+    pub asset: Option<SignedAsset>,
 }
 
 const CACHE_TTL_SECS: u64 = 24 * 60 * 60;
@@ -101,6 +115,7 @@ async fn check_component(
         Some(cr) => cr,
         None => {
             let fresh = fetch_latest(c.repo()).await?;
+            let asset = pick_signed_asset(c, &fresh.assets);
             let cr = CachedRelease {
                 component: c.label().to_string(),
                 latest_tag: fresh.tag_name,
@@ -108,6 +123,7 @@ async fn check_component(
                 published_at: fresh.published_at,
                 fetched_at: now,
                 notes: trim_notes(&fresh.body),
+                asset,
             };
             prefs
                 .update_cache
@@ -127,10 +143,27 @@ async fn check_component(
             release_url: latest.release_url,
             published_at: latest.published_at,
             notes: latest.notes,
+            asset: latest.asset,
         })
     } else {
         None
     }
+}
+
+/// Pick the asset cgui should download for `c`. For Apple's container we
+/// require the **signed** installer; we deliberately refuse the unsigned
+/// variant to keep the install path safe by default.
+fn pick_signed_asset(c: Component, assets: &[GhAsset]) -> Option<SignedAsset> {
+    let needle = match c {
+        Component::AppleContainer => "installer-signed.pkg",
+        Component::CguiSelf => return None, // self-update handled separately (phase 5)
+    };
+    let a = assets.iter().find(|a| a.name.contains(needle))?;
+    Some(SignedAsset {
+        name: a.name.clone(),
+        url: a.browser_download_url.clone(),
+        size: a.size,
+    })
 }
 
 /// Cap release notes so a runaway body can't blow up the modal or the
@@ -139,6 +172,183 @@ fn trim_notes(body: &str) -> String {
     let body = body.replace("\r\n", "\n");
     let lines: Vec<&str> = body.lines().take(80).collect();
     lines.join("\n")
+}
+
+/// Where downloaded installers live. `~/Library/Caches/cgui/` on macOS,
+/// `$XDG_CACHE_HOME/cgui/` elsewhere if set.
+pub fn cache_dir() -> Option<std::path::PathBuf> {
+    if let Some(c) = std::env::var_os("XDG_CACHE_HOME") {
+        return Some(std::path::PathBuf::from(c).join("cgui"));
+    }
+    let home = std::env::var_os("HOME")?;
+    let p = std::path::PathBuf::from(home);
+    Some(if cfg!(target_os = "macos") {
+        p.join("Library").join("Caches").join("cgui")
+    } else {
+        p.join(".cache").join("cgui")
+    })
+}
+
+pub fn cache_path_for(asset: &SignedAsset) -> Option<std::path::PathBuf> {
+    Some(cache_dir()?.join(&asset.name))
+}
+
+/// Spawn a download of `asset` into the cache dir. Streams progress
+/// (downloaded / total bytes, plus percent) into `sink` once a second.
+/// Reuses the cached file if it exists with the right size — no network
+/// call, just a status line and immediate completion.
+///
+/// Publishes the final absolute path through `result_path` on success so
+/// the (single) modal reaper can stay generic over OperationKind. On any
+/// failure the partial download is removed and `result_path` stays None.
+pub fn spawn_download(
+    asset: SignedAsset,
+    sink: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    result_path: std::sync::Arc<std::sync::Mutex<Option<std::path::PathBuf>>>,
+) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    tokio::spawn(async move {
+        let dest = cache_path_for(&asset)
+            .ok_or_else(|| anyhow::anyhow!("no cache dir (HOME unset?)"))?;
+        let dir = dest
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("no parent dir for {}", dest.display()))?;
+        std::fs::create_dir_all(dir)?;
+
+        // Cache reuse — only when the existing file matches the API-reported
+        // size exactly. Partial downloads are nuked so we never install half
+        // a pkg.
+        if let Ok(meta) = std::fs::metadata(&dest) {
+            if meta.len() == asset.size {
+                push(&sink, format!("✓ cached at {} ({} bytes)", dest.display(), meta.len()));
+                if let Ok(mut g) = result_path.lock() {
+                    *g = Some(dest.clone());
+                }
+                return Ok(());
+            } else {
+                push(
+                    &sink,
+                    format!(
+                        "stale partial ({} of {} bytes) — refetching",
+                        meta.len(),
+                        asset.size
+                    ),
+                );
+                let _ = std::fs::remove_file(&dest);
+            }
+        }
+
+        let tmp = dest.with_extension("part");
+        let _ = std::fs::remove_file(&tmp);
+        push(
+            &sink,
+            format!(
+                "$ curl -fL -o {} {} ({} MB)",
+                tmp.display(),
+                asset.url,
+                asset.size / 1024 / 1024
+            ),
+        );
+
+        let mut child = tokio::process::Command::new("curl")
+            .args(["-fL", "--silent", "--show-error", "-o"])
+            .arg(&tmp)
+            .arg(&asset.url)
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(1000));
+        interval.tick().await; // burn the immediate tick
+        let outcome: anyhow::Result<()> = loop {
+            tokio::select! {
+                status = child.wait() => {
+                    let s = status?;
+                    if s.success() {
+                        break Ok(());
+                    } else {
+                        let mut err = String::new();
+                        if let Some(stderr) = child.stderr.as_mut() {
+                            use tokio::io::AsyncReadExt;
+                            let _ = stderr.read_to_string(&mut err).await;
+                        }
+                        break Err(anyhow::anyhow!(
+                            "curl exited {}: {}",
+                            s,
+                            err.trim()
+                        ));
+                    }
+                }
+                _ = interval.tick() => {
+                    if let Ok(meta) = std::fs::metadata(&tmp) {
+                        let pct = if asset.size > 0 {
+                            (meta.len() as f64 / asset.size as f64) * 100.0
+                        } else {
+                            0.0
+                        };
+                        push(
+                            &sink,
+                            format!(
+                                "  {} / {} ({:.1}%)",
+                                human_mb(meta.len()),
+                                human_mb(asset.size),
+                                pct
+                            ),
+                        );
+                    }
+                }
+            }
+        };
+
+        match outcome {
+            Ok(()) => {
+                let final_size = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+                if final_size != asset.size {
+                    let _ = std::fs::remove_file(&tmp);
+                    let msg = format!(
+                        "size mismatch: got {} bytes, expected {}",
+                        final_size, asset.size
+                    );
+                    push(&sink, format!("✗ {msg}"));
+                    return Err(anyhow::anyhow!(msg));
+                }
+                std::fs::rename(&tmp, &dest)?;
+                push(
+                    &sink,
+                    format!(
+                        "✓ cached at {} ({} bytes)",
+                        dest.display(),
+                        final_size
+                    ),
+                );
+                if let Ok(mut g) = result_path.lock() {
+                    *g = Some(dest.clone());
+                }
+                Ok(())
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                push(&sink, format!("✗ {e}"));
+                Err(e)
+            }
+        }
+    })
+}
+
+fn human_mb(bytes: u64) -> String {
+    if bytes < 1024 * 1024 {
+        format!("{} KiB", bytes / 1024)
+    } else {
+        format!("{:.1} MiB", (bytes as f64) / (1024.0 * 1024.0))
+    }
+}
+
+fn push(sink: &std::sync::Arc<std::sync::Mutex<Vec<String>>>, line: String) {
+    if let Ok(mut v) = sink.lock() {
+        if v.len() >= 2000 {
+            v.drain(0..1000);
+        }
+        v.push(line);
+    }
 }
 
 fn installed_version(c: Component) -> Option<String> {
@@ -172,6 +382,15 @@ struct GhRelease {
     published_at: String,
     #[serde(default)]
     body: String,
+    #[serde(default)]
+    assets: Vec<GhAsset>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct GhAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
 }
 
 async fn fetch_latest(repo: &str) -> Option<GhRelease> {

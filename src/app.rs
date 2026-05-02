@@ -93,6 +93,7 @@ pub enum OperationKind {
     Trivy,
     StackUp,
     StackDown,
+    UpdateDownload,
 }
 
 impl OperationKind {
@@ -103,6 +104,7 @@ impl OperationKind {
             OperationKind::Trivy => "scan",
             OperationKind::StackUp => "stack up",
             OperationKind::StackDown => "stack down",
+            OperationKind::UpdateDownload => "download",
         }
     }
     pub fn participle(self) -> &'static str {
@@ -112,6 +114,7 @@ impl OperationKind {
             OperationKind::Trivy => "Scanning",
             OperationKind::StackUp => "Bringing up",
             OperationKind::StackDown => "Tearing down",
+            OperationKind::UpdateDownload => "Downloading",
         }
     }
     pub fn done(self) -> &'static str {
@@ -121,6 +124,7 @@ impl OperationKind {
             OperationKind::Trivy => "Scanned",
             OperationKind::StackUp => "Stack up",
             OperationKind::StackDown => "Stack down",
+            OperationKind::UpdateDownload => "Downloaded",
         }
     }
 }
@@ -306,6 +310,10 @@ pub struct App {
     pub update_modal_idx: usize,
     /// Scroll offset in the modal's release-notes pane.
     pub update_notes_scroll: u16,
+
+    /// Where the most recent successful update download landed. Used by
+    /// phase 4 (`installer`) and surfaced in the status bar after `[D]ownload`.
+    pub download_result: Arc<Mutex<Option<std::path::PathBuf>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -428,6 +436,7 @@ impl App {
             dismissed_updates: HashSet::new(),
             update_modal_idx: 0,
             update_notes_scroll: 0,
+            download_result: Arc::new(Mutex::new(None)),
         }
     }
 

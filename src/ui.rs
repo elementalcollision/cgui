@@ -1495,8 +1495,12 @@ fn draw_update_prompt(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
 
+    let asset_hint = match &u.asset {
+        Some(a) => format!("D download ({} MiB) · ", a.size / 1024 / 1024),
+        None => String::new(),
+    };
     let title = format!(
-        " Update available · {} · {}/{} · O open · L later · ←→ next · Esc close ",
+        " Update · {} · {}/{} · {asset_hint}O open · L later · ←→ · Esc ",
         u.component.label(),
         app.update_modal_idx.min(total.saturating_sub(1)) + 1,
         total

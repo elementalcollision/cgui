@@ -588,6 +588,35 @@ async fn handle_key<B: ratatui::backend::Backend>(
                         }
                     }
                 }
+                KeyCode::Char('D') | KeyCode::Char('d') => {
+                    if let Some(u) = app.current_update() {
+                        let Some(asset) = u.asset.clone() else {
+                            app.set_status(format!(
+                                "no signed installer asset for {} {}",
+                                u.component.label(),
+                                u.latest
+                            ));
+                            return Ok(());
+                        };
+                        if let Ok(mut v) = app.pull_log.lock() { v.clear(); }
+                        if let Ok(mut g) = app.download_result.lock() { *g = None; }
+                        app.pull_running = true;
+                        app.op_kind = OperationKind::UpdateDownload;
+                        app.pull_reference = Some(format!("{} {}", u.component.label(), u.latest));
+                        app.op_scroll = 0;
+                        *pull_handle = Some(update::spawn_download(
+                            asset,
+                            app.pull_log.clone(),
+                            app.download_result.clone(),
+                        ));
+                        app.mode = Mode::PullProgress;
+                        app.set_status(format!(
+                            "downloading {} {}…",
+                            u.component.label(),
+                            u.latest
+                        ));
+                    }
+                }
                 _ => {}
             }
             return Ok(());
