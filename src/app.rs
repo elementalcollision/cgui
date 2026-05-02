@@ -314,6 +314,14 @@ pub struct App {
     /// Where the most recent successful update download landed. Used by
     /// phase 4 (`installer`) and surfaced in the status bar after `[D]ownload`.
     pub download_result: Arc<Mutex<Option<std::path::PathBuf>>>,
+
+    /// True when `[I]nstall` queued a download — the reaper triggers the
+    /// install dance as soon as the download lands. Cleared after attempt.
+    pub install_after_download: bool,
+    /// Component the queued install targets (so we know whose latest
+    /// version to verify after `installer` exits).
+    pub install_component: Option<crate::update::Component>,
+    pub install_expected: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -437,6 +445,9 @@ impl App {
             update_modal_idx: 0,
             update_notes_scroll: 0,
             download_result: Arc::new(Mutex::new(None)),
+            install_after_download: false,
+            install_component: None,
+            install_expected: None,
         }
     }
 

@@ -334,6 +334,59 @@ pub fn spawn_download(
     })
 }
 
+/// How the user installed the runtime — drives whether `[I]nstall` runs
+/// `sudo installer -pkg …` or `brew upgrade container`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum InstallKind {
+    Pkg,
+    Brew,
+}
+
+/// Detect whether `container` is brew-installed by inspecting `which`'s
+/// output for a brew-typical path. Conservative: anything else is `Pkg`.
+pub fn install_kind() -> InstallKind {
+    let bin = crate::runtime::binary();
+    let out = std::process::Command::new("which").arg(&bin).output();
+    if let Ok(o) = out {
+        if o.status.success() {
+            let path = String::from_utf8_lossy(&o.stdout);
+            let path = path.trim();
+            if path.contains("/Cellar/")
+                || path.contains("/opt/homebrew/")
+                || path.contains("/.linuxbrew/")
+            {
+                return InstallKind::Brew;
+            }
+        }
+    }
+    InstallKind::Pkg
+}
+
+/// Argv for `sudo installer` against a downloaded pkg. Caller is
+/// responsible for the suspend-TUI dance.
+pub fn installer_argv(pkg: &std::path::Path) -> Vec<String> {
+    vec![
+        "sudo".into(),
+        "installer".into(),
+        "-pkg".into(),
+        pkg.display().to_string(),
+        "-target".into(),
+        "/".into(),
+    ]
+}
+
+/// Argv for the brew upgrade path. No sudo; brew handles its own prompts.
+pub fn brew_upgrade_argv(c: Component) -> Vec<String> {
+    vec![
+        "brew".into(),
+        "upgrade".into(),
+        match c {
+            Component::AppleContainer => "container".into(),
+            Component::CguiSelf => "cgui".into(),
+        },
+    ]
+}
+
 fn human_mb(bytes: u64) -> String {
     if bytes < 1024 * 1024 {
         format!("{} KiB", bytes / 1024)

@@ -1495,12 +1495,15 @@ fn draw_update_prompt(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
 
-    let asset_hint = match &u.asset {
-        Some(a) => format!("D download ({} MiB) · ", a.size / 1024 / 1024),
-        None => String::new(),
+    let install_hint = match crate::update::install_kind() {
+        crate::update::InstallKind::Brew => "I brew upgrade · ",
+        crate::update::InstallKind::Pkg => match &u.asset {
+            Some(_) => "I install (sudo) · D download · ",
+            None => "",
+        },
     };
     let title = format!(
-        " Update · {} · {}/{} · {asset_hint}O open · L later · ←→ · Esc ",
+        " Update · {} · {}/{} · {install_hint}O open · L later · ←→ · Esc ",
         u.component.label(),
         app.update_modal_idx.min(total.saturating_sub(1)) + 1,
         total

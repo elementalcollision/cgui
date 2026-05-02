@@ -244,6 +244,17 @@ Progress streams into the same modal we use for pull/build/scan: a "Downloading 
 
 Phase 4 will use the cached path to invoke `sudo installer -pkg <path> -target /`. Phase 3 stops at "downloaded" — nothing is run with elevated privileges.
 
+#### `[I]nstall`
+
+Pressing `I` in the update modal kicks off the install path. cgui auto-detects how the runtime was installed and picks the right route:
+
+- **`.pkg` install** (the default — runtime under `/usr/local/`): cgui chains `[D]` first if the asset isn't cached, then **suspends the TUI** (leaves alt-screen + raw mode) and runs `sudo installer -pkg <cached-pkg> -target /`. The `sudo` password prompt and installer's progress land on your real terminal — cgui doesn't intercept either. The TUI is restored on exit.
+- **Homebrew install** (binary under `/opt/homebrew/Cellar/` or `/usr/local/Cellar/`): no download, no sudo. cgui suspends the TUI and runs `brew upgrade container` so brew's chatty output is visible.
+
+Either path is followed by a **post-install verify**: cgui re-runs `container --version`, parses it, and compares to the expected `latest`. On a confirmed upgrade the chip vanishes immediately and the status bar reads `✓ upgraded container to 0.13.0`. On version mismatch (`installer` claimed success but the version didn't change) you get `⚠ installer ran but container is X (expected Y)` so you can investigate.
+
+Failure modes are explicit: download failed → `install cancelled (download failed)`; installer non-zero exit → `installer exited <status>`; sudo cancelled → no version change reported. The cached `.pkg` is left in place so you can retry without re-downloading.
+
 `cgui doctor` includes the same information without launching the TUI; `cgui update` forces a fresh API hit (bypasses the 24h cache and the opt-out).
 
 Disable entirely with `cgui --no-update` (persists `auto_update_check = false` in `state.json`). The opt-out is honoured by the background check and `cgui doctor`; the explicit `cgui update` subcommand always runs.
@@ -383,6 +394,7 @@ State refresh is async and best-effort: if one source (e.g. `volume ls`) fails, 
 | Update detection (status chip + `cgui doctor` row)    | ✅ shipped | 0.13.0         |
 | Update prompt modal (`U`, `[O]pen`, `[L]ater`)        | ✅ shipped | 0.13.1         |
 | Update download (`[D]`) to `~/Library/Caches/cgui/`   | ✅ shipped | 0.13.2         |
+| Update install (`[I]`) — sudo installer / brew + verify | ✅ shipped | 0.13.3       |
 | Optional GUI front end (Tauri)                        | 🟡 planned | —              |
 
 ## Roadmap

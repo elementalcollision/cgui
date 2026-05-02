@@ -132,6 +132,23 @@ async fn event_loop<B: ratatui::backend::Backend>(term: &mut Terminal<B>) -> Res
                 if matches!(app.op_kind, OperationKind::StackUp | OperationKind::StackDown) {
                     app.reload_stacks();
                 }
+                // Queued install: if `[I]` triggered the download and it
+                // succeeded with a cached path, run the suspend+sudo dance
+                // now. Failure (download err) clears the queue silently.
+                if app.op_kind == OperationKind::UpdateDownload && app.install_after_download {
+                    let path = app.download_result.lock().ok().and_then(|g| g.clone());
+                    match path {
+                        Some(p) => {
+                            install_pkg(term, &mut app, p).await?;
+                        }
+                        None => {
+                            app.set_status("install cancelled (download failed)");
+                            app.install_after_download = false;
+                            app.install_component = None;
+                            app.install_expected = None;
+                        }
+                    }
+                }
                 refresh_now(&mut app).await;
             }
         }
@@ -590,31 +607,35 @@ async fn handle_key<B: ratatui::backend::Backend>(
                 }
                 KeyCode::Char('D') | KeyCode::Char('d') => {
                     if let Some(u) = app.current_update() {
-                        let Some(asset) = u.asset.clone() else {
+                        start_update_download(app, pull_handle, &u, false);
+                    }
+                }
+                KeyCode::Char('I') | KeyCode::Char('i') => {
+                    if let Some(u) = app.current_update() {
+                        // Brew path skips the download: brew owns the
+                        // asset itself.
+                        if update::install_kind() == update::InstallKind::Brew {
+                            // Stash target so the post-run verify knows what to compare.
+                            app.install_component = Some(u.component);
+                            app.install_expected = Some(u.latest.clone());
+                            install_brew(term, app, u.component).await?;
+                            app.mode = Mode::Browse;
+                            return Ok(());
+                        }
+                        if u.asset.is_none() {
                             app.set_status(format!(
                                 "no signed installer asset for {} {}",
                                 u.component.label(),
                                 u.latest
                             ));
                             return Ok(());
-                        };
-                        if let Ok(mut v) = app.pull_log.lock() { v.clear(); }
-                        if let Ok(mut g) = app.download_result.lock() { *g = None; }
-                        app.pull_running = true;
-                        app.op_kind = OperationKind::UpdateDownload;
-                        app.pull_reference = Some(format!("{} {}", u.component.label(), u.latest));
-                        app.op_scroll = 0;
-                        *pull_handle = Some(update::spawn_download(
-                            asset,
-                            app.pull_log.clone(),
-                            app.download_result.clone(),
-                        ));
-                        app.mode = Mode::PullProgress;
-                        app.set_status(format!(
-                            "downloading {} {}…",
-                            u.component.label(),
-                            u.latest
-                        ));
+                        }
+                        // Pkg path: queue the install to fire after the
+                        // download lands (or immediately if cached).
+                        app.install_component = Some(u.component);
+                        app.install_expected = Some(u.latest.clone());
+                        app.install_after_download = true;
+                        start_update_download(app, pull_handle, &u, true);
                     }
                 }
                 _ => {}
@@ -1485,6 +1506,145 @@ async fn stack_logs(
     let id = stacks::container_name(&stack.name, &svc.name);
     start_follow(app, log_handle, id);
     app.set_tab(Tab::Logs);
+}
+
+/// Kick off an UpdateDownload spawn. `for_install` only changes the status
+/// line so the user sees that the download is the first half of an install.
+fn start_update_download(
+    app: &mut App,
+    pull_handle: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+    u: &update::UpdateInfo,
+    for_install: bool,
+) {
+    let Some(asset) = u.asset.clone() else {
+        app.set_status("no signed installer asset");
+        return;
+    };
+    if let Ok(mut v) = app.pull_log.lock() { v.clear(); }
+    if let Ok(mut g) = app.download_result.lock() { *g = None; }
+    app.pull_running = true;
+    app.op_kind = OperationKind::UpdateDownload;
+    app.pull_reference = Some(format!("{} {}", u.component.label(), u.latest));
+    app.op_scroll = 0;
+    *pull_handle = Some(update::spawn_download(
+        asset,
+        app.pull_log.clone(),
+        app.download_result.clone(),
+    ));
+    app.mode = Mode::PullProgress;
+    app.set_status(if for_install {
+        format!("downloading {} {} (will install on completion)…", u.component.label(), u.latest)
+    } else {
+        format!("downloading {} {}…", u.component.label(), u.latest)
+    });
+}
+
+/// Run `sudo installer -pkg <pkg> -target /` with the TUI fully suspended,
+/// so the sudo password prompt and installer's stderr land on the user's
+/// real terminal. Restores the TUI on return and verifies the new version.
+async fn install_pkg<B: ratatui::backend::Backend>(
+    term: &mut Terminal<B>,
+    app: &mut App,
+    pkg: std::path::PathBuf,
+) -> Result<()> {
+    let component = app.install_component.unwrap_or(update::Component::AppleContainer);
+    let expected = app.install_expected.clone().unwrap_or_default();
+    let argv = update::installer_argv(&pkg);
+    let pretty = argv.join(" ");
+
+    leave_terminal()?;
+    println!("\n--- cgui install → {pretty} ---");
+    println!("--- sudo will prompt for your password ---\n");
+    let status = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status();
+    enter_terminal()?;
+    term.clear()?;
+
+    match status {
+        Ok(s) if s.success() => verify_post_install(app, component, &expected),
+        Ok(s) => app.set_status(format!("installer exited {s} — version unchanged?")),
+        Err(e) => app.set_status(format!("installer spawn error: {e}")),
+    }
+    Ok(())
+}
+
+/// Brew path: no sudo, no download. Suspends the TUI just so brew's progress
+/// (which can be chatty) is visible on the real terminal.
+async fn install_brew<B: ratatui::backend::Backend>(
+    term: &mut Terminal<B>,
+    app: &mut App,
+    component: update::Component,
+) -> Result<()> {
+    let expected = app.install_expected.clone().unwrap_or_default();
+    let argv = update::brew_upgrade_argv(component);
+    let pretty = argv.join(" ");
+
+    leave_terminal()?;
+    println!("\n--- cgui upgrade → {pretty} ---\n");
+    let status = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status();
+    enter_terminal()?;
+    term.clear()?;
+
+    match status {
+        Ok(s) if s.success() => verify_post_install(app, component, &expected),
+        Ok(s) => app.set_status(format!("brew upgrade exited {s}")),
+        Err(e) => app.set_status(format!("brew spawn error: {e}")),
+    }
+    Ok(())
+}
+
+/// Re-read the installed version, compare against `expected`, and report.
+/// On a confirmed upgrade we drop the matching entry from `app.updates` so
+/// the chip vanishes immediately.
+fn verify_post_install(
+    app: &mut App,
+    component: update::Component,
+    expected: &str,
+) {
+    use std::cmp::Ordering;
+    match component {
+        update::Component::AppleContainer => {
+            let installed = std::process::Command::new(crate::runtime::binary())
+                .arg("--version")
+                .output()
+                .ok()
+                .and_then(|o| {
+                    let s = String::from_utf8_lossy(&o.stdout).into_owned();
+                    s.split_whitespace()
+                        .find(|t| update::parse_version(t.trim_start_matches('v')).is_some())
+                        .map(|s| s.trim_start_matches('v').to_string())
+                });
+            // Drop the cached release for `container` so the next check (on
+            // next launch or `cgui update`) recomputes against fresh data.
+            app.prefs.update_cache.retain(|c| c.component != "container");
+            app.prefs.save();
+            match installed {
+                Some(v) => {
+                    let cmp = update::compare_versions(&v, expected);
+                    if cmp != Ordering::Less {
+                        app.set_status(format!("✓ upgraded container to {v}"));
+                        app.updates.retain(|u| u.component != component);
+                    } else {
+                        app.set_status(format!(
+                            "⚠ installer ran but container is {v} (expected {expected})"
+                        ));
+                    }
+                }
+                None => app.set_status("⚠ post-install version check failed"),
+            }
+        }
+        update::Component::CguiSelf => {
+            // cgui self-update happens out-of-process; nothing to verify here.
+            app.set_status(format!("brew upgrade cgui finished — restart to pick up {expected}"));
+            app.updates.retain(|u| u.component != component);
+        }
+    }
+    app.install_after_download = false;
+    app.install_component = None;
+    app.install_expected = None;
 }
 
 /// Drop into `container exec -ti <id> /bin/sh` for the selected container.
